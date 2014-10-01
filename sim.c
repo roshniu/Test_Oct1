@@ -1,3 +1,11 @@
+/*
+ * sim.c
+ * All rights reserved.
+ *
+ *  Created on: Oct 19, 2013
+ *      Author: damon stachler, roshni uppala
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
@@ -9,44 +17,37 @@
 
 struct instruction inst_mem[MAX_LINES_OF_CODE];
 struct instruction IR[16];
-struct pipeline_buffer{
+struct pipeline_buffer{ //pipeline buffer
 	char *op;
 	char *operands;
 	int valid;
 	int fetch_cycle;
+	int branch_taken;
+	int branch_prediction;
 	struct instruction IR_buf;  //Instruction for the buffer
 	int total_no_instr_fetched;
 }IF_ID[16],ID_DIS[16],DIS_ISS[16],ISS_EX[16],EX_COM[16],IF,ID,DIS;
 
-struct FETCH_TABLE{
-		int L1_hit;
-		int L2_hit;
-		int mem_hit;
-		int fetch_time;
-		char *op;
-
-		char *operands;
-		int valid;
-		struct instruction IR_buf;
-		int L1_misscount;
-		int L2_misscount;
-
-	};
-
 int code_length;
-int SW=4; // Superscalar width
+int SW; // Superscalar width
 int BTB_size; // Branch target buffer size
-int RS_entries=6; // NUmber of Reservation entries
-int FU_no=1; // Number of functional units
+int BTB_tail = -1;
+int RS_entries; // NUmber of Reservation entries
+int FU_no; // Number of functional units
+int BTB[100];
 
-int RRF_no=50; // Number of renaming buffer entries
-int ROB_no=50; // Number of reorder buffer entries
-int L1_hitrate=100; // L1 cache hitrate
-int L2_hitrate=100; // L2 cache hitrate
-int L1_time=4; // L1 cache access time
-int L2_time=8; // L2 cache access time
+int RRF_no; // Number of renaming buffer entries
+int ROB_no; // Number of reorder buffer entries
+int L1_hitrate; // L1 cache hitrate
+int L2_hitrate; // L2 cache hitrate
+int L1_time; // L1 cache access time
+int L2_time; // L2 cache access time
 char filename[15]; // Filename of trace file
-int MEM_time=10;   // Memmory access time
+int MEM_time;   // Memmory access time
+int L1_data_hitrate;
+int L1_data_miss = 0;
+int L2_data_miss = 0;
+int L1_data_time=1;
 
 int L1_miss = 0;
 int L2_miss = 0;
@@ -54,19 +55,18 @@ int fetch_flag=0;
 int k=0;
 
 FILE *fpt;
-char *Fetch_Array[4];
-char *Decode_Array[4];
-//int superscalar = 1;
+char *Fetch_Array[20];
+char *Decode_Array[20];
 bool done = false;
 char	opcode[20],operands[40],label[20];
-struct instruction Decode_inst[4];
-struct RRF_table RRF[512];
-struct ARF_table ARF[65];
-struct RS_table RS_int[513], RS_fpp[513], RS_mem[513], RS_br[513];
-struct ROB_table ROB[513];
-struct FU_block FU_int[8],FU_fpp[8],FU_mem[8],FU_br[1];
-struct DISPATCH_TABLE DISPATCH[513];
-struct FETCH_TABLE FETCH[513];
+struct instruction Decode_inst[16];
+struct RRF_table RRF[512];// renaming register file
+struct ARF_table ARF[65]; // architecture register file
+struct RS_table RS_int[513], RS_fpp[513], RS_mem[513], RS_br[513]; // reservation stations
+struct ROB_table ROB[513]; // reorder buffer
+struct FU_block FU_int[8],FU_fpp[8],FU_mem[8],FU_br[1]; //functional units
+struct DISPATCH_TABLE DISPATCH[513]; // dispatch bbufer
+struct FETCH_TABLE FETCH[513]; // fetching buffer
 
 int head_rob=-1;
 int tail_rob=-1;
@@ -92,14 +92,18 @@ int available_rob,available_rrf,available_rs_int,available_rs_fpp,available_rs_m
 int index_to_arf;
 int IR_inserted_flag=0;
 
+int total_branches = 0;
+int correct_predictions = 0;
+
+fpos_t *pos;
+
 
 //gshare variables
 unsigned int default_pc;
 unsigned int pc_value;
 int pc_and,pc_shift,offset_addr,br_pred_bit;
 int br_pred;
-int gshare[1024];
-unsigned int bhsr=0xffc;
+unsigned int bhsr=0;
 int x;
 int rob_overflow_stall = 0;
 int rs_mem_overflow_stall = 0;
@@ -118,6 +122,43 @@ int instr_to_fetch=0;
 int wait_L1=0;
 int wait_L2=0;
 int wait_Mem=0;
+int fetch_time = 0;
+int cycles = 0;
+int finished_instructions = 0;
+double IPC;
+
+int fu_int_utilization=0;
+int fu_fpp_utilization=0;
+int fu_mem_utilization=0;
+int fu_br_utilization=0;
+int rs_int_utilization=0;
+int rs_fpp_utilization=0;
+int rs_mem_utilization=0;
+int rs_br_utilization=0;
+int rob_utilization=0;
+int rrf_utilization=0;
+//initializing the gshare predictor to 2
+int gshare[1024] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+ 		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+ 		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+		   2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
 
 void handler(int sig)
 {
@@ -138,20 +179,13 @@ void handler(int sig)
 
 int main(int argc, char **argv)
 {
+	int bb;
 	/* FILENAME FROM THE USER */
 	printf("Enter the trace filename");
 	scanf("%s",&filename);
 	argv[1]=filename;
 	argc=2;
 
-	//if(argc!=2)    /* Checking command line inputs */
-	//{
-	//	printf("Enter the trace filename");
-	//	scanf("%s",&filename);
-	     //printf("Usage:sim [program]\n");
-		 //perror(fpt);
-	//	 exit(0);
-	//}
 
 	//signal(SIGSEGV, handler);
 	if ((fpt=fopen(argv[1],"r")) == NULL)
@@ -160,44 +194,57 @@ int main(int argc, char **argv)
   		exit(0);
   	}
 	 /* superscalar factor*/
-//		printf("Enter the superscalar factor [1-16] : \t ");
-//		scanf("%d",&SW);
-//
-//		 /* Branch target buffer size*/
-//		printf("Enter the Branch target buffer entry size[ ] : \t ");
-//		scanf("%d",&BTB_size);
-//
-//		   /* NUmber of reservation entries */
-//		printf("Enter the number of reservation station entries [1-8 ]: \t");
-//		scanf("%d",&RS_entries);
-//
-//		 /* Number of functional units*/
-//		printf("Enter the number of Integer, floating point, Memory functional units[1-8] : \t");
-//		scanf("%d",&FU_no);
-//
-//		 /*NUmber of renaming table entries*/
-//		printf("Enter the number of renaming table entries[1-512] : \t");
-//		scanf("%d",&RRF_no);
-//
-//		 /*Number of Reorder Buffer Entries*/
-//		printf("Enter the number of Reorder Buffer entries [1-512] : \t");
-//		scanf("%d",&ROB_no);
-//
-//	    /*L1 cache hit rate */
-//		printf ("Enter L1 cache hit rate [1-100] : \t");
-//		scanf("%d",&L1_hitrate);
-//
-//		 /*L2 cache hit rate */
-//		printf("Enter L2 cache hit rate [1-100] : \t");
-//		scanf("%d",&L2_hitrate);
-//
-//	 /*L1 cache latency (access time)*/
-//		printf("Enter L1 cache latency(access time) [1-100] : \t");
-//		scanf("%d",&L1_time);
-//
-//		 /*L2 cache latency (access time) */
-//		printf("Enter L2 cache latency(access time)[1-100] : \t");
-//		scanf("%d",&L2_time);
+		printf("Enter the superscalar factor [1-16] : \t ");
+		scanf("%d",&SW);
+
+		 /* Branch target buffer size*/
+		printf("Enter the Branch target buffer entry size[ ] : \t ");
+		scanf("%d",&BTB_size);
+
+		   /* NUmber of reservation entries */
+		printf("Enter the number of reservation station entries [1-8 ]: \t");
+		scanf("%d",&RS_entries);
+
+		 /* Number of functional units*/
+		printf("Enter the number of Integer, floating point, Memory functional units[1-8] : \t");
+		scanf("%d",&FU_no);
+
+		 /*NUmber of renaming table entries*/
+		printf("Enter the number of renaming table entries[1-512] : \t");
+		scanf("%d",&RRF_no);
+
+		 /*Number of Reorder Buffer Entries*/
+		printf("Enter the number of Reorder Buffer entries [1-512] : \t");
+		scanf("%d",&ROB_no);
+
+	    /*L1 instruction cache hit rate */
+		printf ("Enter L1 instruction cache hit rate [1-100] : \t");
+		scanf("%d",&L1_hitrate);
+
+		 /*L2 cache hit rate */
+		printf("Enter L2 cache hit rate [1-100] : \t");
+		scanf("%d",&L2_hitrate);
+
+	 /*L1 cache latency (access time)*/
+		printf("Enter L1 cache latency(access time) [1-100] : \t");
+		scanf("%d",&L1_time);
+
+		 /*L2 cache latency (access time) */
+		printf("Enter L2 cache latency(access time)[1-100] : \t");
+		scanf("%d",&L2_time);
+
+		/*L1 data cache hit rate */
+		printf("Enter L1 data cache hit rate [1-100] : \t");
+		scanf("%d",&L1_data_hitrate);
+
+		/* L1 data cache access time */
+		printf("Enter L1 data cache access time [1-100] : \t");
+		scanf("%d",&L1_data_time);
+
+		/* Main Memory access time */
+		printf("Enter main memory access time [1-100] : \5");
+		scanf("%d",&MEM_time);
+
 	for(i=0;i<16;i++)
 	{
 		IF_ID[i].op = (char*)malloc(15);
@@ -205,11 +252,7 @@ int main(int argc, char **argv)
 		FETCH[i].op=(char*)malloc(15);
 		FETCH[i].operands=(char*)malloc(50);
 	}
-	for (i=0;i<BTB_size;i++)
-	{
-	 gshare[i]=1;
 
-	}
 	while(done != true)
 	{
 		Commit();
@@ -218,72 +261,138 @@ int main(int argc, char **argv)
 		Dispatch();
 		Decode();
 		Fetch();
+		cycles = cycles + 1;
+		for(bb=0; bb<FU_no; bb++)
+		{
+			if(FU_int[bb].busy == 1)
+				fu_int_utilization += 1;
+			if(FU_fpp[bb].busy == 1)
+				fu_fpp_utilization += 1;
+			if(FU_mem[bb].busy == 1)
+				fu_mem_utilization += 1;
+		}
+		if(FU_br[0].busy == 1)
+			fu_br_utilization += 1;
+		for(bb=0; bb<RS_entries; bb++)
+		{
+			if(RS_int[bb].busy == 1)
+				rs_int_utilization += 1;
+			if(RS_fpp[bb].busy == 1)
+				rs_fpp_utilization += 1;
+			if(RS_mem[bb].busy == 1)
+				rs_mem_utilization += 1;
+			if(RS_br[bb].busy == 1)
+				rs_br_utilization += 1;
+		}
+		for(bb=0; bb<RRF_no; bb++)
+		{
+			if(RRF[bb].busy == 1)
+				rrf_utilization += 1;
+		}
+		for(bb=0; bb<ROB_no; bb++)
+		{
+			if(ROB[bb].busy == 1)
+				rob_utilization +=1;
+		}
 	}
-	while(head_dispatch != tail_dispatch)
+
+	while(head_dispatch != -1)
 	{
 		Commit();
 		Execute();
 		Issue();
 		Dispatch();
-		Fetch();
+		Decode();
+		cycles = cycles + 1;
+		for(bb=0; bb<FU_no; bb++)
+		{
+			if(FU_int[bb].busy == 1)
+				fu_int_utilization += 1;
+			if(FU_fpp[bb].busy == 1)
+				fu_fpp_utilization += 1;
+			if(FU_mem[bb].busy == 1)
+				fu_mem_utilization += 1;
+		}
+		if(FU_br[0].busy == 1)
+			fu_br_utilization += 1;
+		for(bb=0; bb<RS_entries; bb++)
+		{
+			if(RS_int[bb].busy == 1)
+				rs_int_utilization += 1;
+			if(RS_fpp[bb].busy == 1)
+				rs_fpp_utilization += 1;
+			if(RS_mem[bb].busy == 1)
+				rs_mem_utilization += 1;
+			if(RS_br[bb].busy == 1)
+				rs_br_utilization += 1;
+		}
+		for(bb=0; bb<RRF_no; bb++)
+		{
+			if(RRF[bb].busy == 1)
+				rrf_utilization += 1;
+		}
+		for(bb=0; bb<ROB_no; bb++)
+		{
+			if(ROB[bb].busy == 1)
+				rob_utilization +=1;
+		}
 	}
-	DIS_ISS[0].valid = 1;
-	ISS_EX[0].valid = 1;
-	while(head_rob != tail_rob)
+
+	while(head_rob != -1)
 	{
 		Commit();
 		Execute();
 		Issue();
+		cycles = cycles + 1;
+		for(bb=0; bb<FU_no; bb++)
+		{
+			if(FU_int[bb].busy == 1)
+				fu_int_utilization += 1;
+			if(FU_fpp[bb].busy == 1)
+				fu_fpp_utilization += 1;
+			if(FU_mem[bb].busy == 1)
+				fu_mem_utilization += 1;
+		}
+		if(FU_br[0].busy == 1)
+			fu_br_utilization += 1;
+		for(bb=0; bb<RS_entries; bb++)
+		{
+			if(RS_int[bb].busy == 1)
+				rs_int_utilization += 1;
+			if(RS_fpp[bb].busy == 1)
+				rs_fpp_utilization += 1;
+			if(RS_mem[bb].busy == 1)
+				rs_mem_utilization += 1;
+			if(RS_br[bb].busy == 1)
+				rs_br_utilization += 1;
+		}
+		for(bb=0; bb<RRF_no; bb++)
+		{
+			if(RRF[bb].busy == 1)
+				rrf_utilization += 1;
+		}
+		for(bb=0; bb<ROB_no; bb++)
+		{
+			if(ROB[bb].busy == 1)
+				rob_utilization +=1;
+		}
 	}
 
-	Commit();
-	Execute();
-	Issue();
-	Dispatch();
-	Decode();
-	Commit();
-	Execute();
-	Issue();
-	Dispatch();/*
-	Commit();
-	Execute();
-	Issue();
-	Dispatch();
-	Commit();
-	Execute();
-	Issue();
-	Commit();
-	DIS_ISS[0].valid = 1;
-	ISS_EX[0].valid = 1;
-	Execute();
-	Issue();
-	Commit();
-	Execute();
-	Issue();
-
-Commit();
-	Execute();
-	Issue();
-Commit();
-	Execute();
-	Issue();
-Commit();
-	Execute();
-	Issue();
-Commit();
-	Execute();
-	Issue();
-Commit();
-	Execute();
-	Issue();
-Commit();
-	Execute();
-	Issue();*/
-
-
-
-
-
+	// calculation of IPC and resource utilizations
+	finished_instructions = finished_instructions - 1; // number of finished instructions
+	IPC = (double)finished_instructions/(double)cycles;
+	printf("Total Cycles: %d Finished Instructions: %d IPC: %2.4f\n", cycles, finished_instructions, IPC);
+	printf("Branch Prediction Rate %2.2f\%\n", ((float)correct_predictions/total_branches)*100);
+	printf("FU_int utilization %2.4f\%\n", (((double)fu_int_utilization/(double)cycles)/(double)FU_no)*100.00);
+	printf("FU_fpp utilization %2.4f\%\n", (((double)fu_fpp_utilization/(double)cycles)/(double)FU_no)*100.00);
+	printf("FU_mem utilization %2.4f\%\n", (((double)fu_mem_utilization/(double)cycles)/(double)FU_no)*100.00);
+	printf("FU_br utilization %2.4f\%\n", (((double)fu_br_utilization/(double)cycles)/(double)1)*100.00);
+	printf("RS_int utilization %2.4f\%\n", (((double)rs_int_utilization/(double)cycles)/(double)RS_entries)*100.00);
+	printf("RS_fpp utilization %2.4f\%\n", (((double)rs_fpp_utilization/(double)cycles)/(double)RS_entries)*100.00);
+	printf("RS_mem utilization %2.4f\%\n", (((double)rs_mem_utilization/(double)cycles)/(double)RS_entries)*100.00);
+	printf("RS_br utilization %2.4f\%\n", (((double)rs_br_utilization/(double)cycles)/(double)RS_entries)*100.00);
+	printf("RRF utilization %2.4f\%\n", (((double)rrf_utilization/(double)cycles)/(double)RRF_no)*100.00);
+	printf("ROB utilization %2.4f\%\n", (((double)rob_utilization/(double)cycles)/(double)ROB_no)*100.00);
 
 	for(i=0;i<16;i++)
 	{
@@ -296,32 +405,120 @@ Commit();
 	return 0;
 }
 
+Branch_Prediction(char *opcode, int index)  // gshare branch predictor with branch target buffer
+{
+	char input[81], line[81];
+	char *field1, *field2, *field3;
+	int nextPC;
+	int gshare_index;
+	int ii;
+
+	if(strcmp(opcode,"j")==0 || strcmp(opcode,"jal")==0 || strcmp(opcode,"jr")==0 || strcmp(opcode,"jalr")==0 || strcmp(opcode,"beq")==0 ||
+	strcmp(opcode,"bne")==0 || strcmp(opcode,"blez")==0 || strcmp(opcode,"bgtz")==0 || strcmp(opcode,"bltz")==0 || strcmp(opcode,"bgez")==0 ||
+	strcmp(opcode,"bc1f")==0 || strcmp(opcode,"bc1t")==0)
+	{
+		total_branches += 1;
+		if(feof(fpt))
+		{
+			IF_ID[index].branch_taken = 0;
+			IF_ID[index].branch_prediction = 0;
+			gshare_index = ((IF_ID[index].IR_buf.PC&0x3FF) >> 3) ^ bhsr;
+			if(gshare[gshare_index] == 0 || gshare[gshare_index] == 1)
+				IF_ID[index].branch_prediction = 0;
+			else if(gshare[gshare_index] == 2 || gshare[gshare_index] == 3)
+				IF_ID[index].branch_prediction = 1;
+
+			if(BTB_tail == -1)
+			{
+				//PC not in BTB branch mispredicted
+			}
+			else
+			{
+				for(ii=0; ii<BTB_tail; ii++)
+				{
+					if(BTB[ii] == IF_ID[index].IR_buf.PC)
+					{
+						if(IF_ID[index].branch_taken == IF_ID[index].branch_prediction)
+						{
+							correct_predictions += 1;
+							break;
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			fgetpos(fpt,&pos);
+			fgets(input,80,fpt);
+			strcpy(line,input);
+			ParseLineIntoTokens(line," \t\n",&field1,&field2,&field3);
+			nextPC = atoi(field1);
+			if(IF_ID[index].IR_buf.PC+8 == nextPC)
+			{
+				IF_ID[index].branch_taken = 0;
+			}
+			else
+			{
+				IF_ID[index].branch_taken = 1;
+			}
+			gshare_index = ((IF_ID[index].IR_buf.PC&0x3FF) >> 3) ^ bhsr;
+			if(gshare[gshare_index] == 0 || gshare[gshare_index] == 1)
+				IF_ID[index].branch_prediction = 0;
+			else if(gshare[gshare_index] == 2 || gshare[gshare_index] == 3)
+				IF_ID[index].branch_prediction = 1;
+
+			if(BTB_tail == -1)
+			{
+				//PC not in BTB branch mispredicted
+			}
+			else
+			{
+				for(ii=0; ii<BTB_tail; ii++)
+				{
+					if(BTB[ii] == IF_ID[index].IR_buf.PC)
+					{
+						if(IF_ID[index].branch_taken == IF_ID[index].branch_prediction)
+						{
+							correct_predictions += 1;
+							break;
+						}
+					}
+				}
+			}
+
+
+			fsetpos(fpt,&pos);
+		}
+	}
+}
+
 /*----------------------------------------------------------------------------------------------*/
 /*************Fetch Stage****************************/
 void Fetch()
 /* Fetches the instruction with there address. Fetch group is decided based on the superscalar width given by the user*/
 
 {
-	//string field1, field2, field3, input, line;
+
+	tail_fetch=-1;
+	head_fetch=-1;
+
 	int flag=0;
+	total_no_instr_fetched=0;
 	char *field1, *field2, *field3;
 	char input[81], line[81];
-	//char *input, *line;
 
-	if(rob_overflow_stall == 1 || rs_mem_overflow_stall == 1)
+
+	if(rob_overflow_stall == 1 || rs_mem_overflow_stall == 1 || dispatch_overflow_stall == 1)
 	{
+		// stall since overflows
 	}
 	else
 	{
-//		if(total_no_instr_fetched<SW)
-//		{
-//			i=total_no_instr_fetched;
-//		}
-//		else
 		i=0;
 	if(counter==0)
 	{
-		while(i !=SW)
+		while(i !=SW) // generating hit or miss depending on random number
 
 		{
 			if((rand()%100)<= L1_hitrate)
@@ -358,25 +555,22 @@ void Fetch()
 	loop1:
 		while((i !=SW))
 		{
-			if(FETCH[i].L1_hit==1)
+			if(FETCH[i].L1_hit==1) // l1 cache hit?
 			{
-				//if(((rand()%100)<= L1_hitrate)&& (L1_miss==0))
-				// Generating a random number for a instruction and checking if a hit is possible in the L1 cache
-				// Put instruction in the IF/ID buffer
-				//l1:
+
 				if(wait_L1>=L1_time)
 				{
 					while(fgets(input,80,fpt)!=NULL)
 					{
-					//wait_L1=0;
 					strcpy(line,input);
 					ParseLineIntoTokens(line," \t\n",&field1,&field2,&field3);
 					FETCH[i].IR_buf.PC = atoi(field1);
 					strncpy(FETCH[i].op,field2,strlen(field2)+1);
-					strncpy(FETCH[i].operands,field3,strlen(field3)+1);
+					if(field3 != NULL)
+						strncpy(FETCH[i].operands,field3,strlen(field3)+1);
 					FETCH[i].valid = if_valid;
-					FETCH[i].fetch_time=l1_fetch_cycle;
-					//l1_fetch_cycle=0;
+					FETCH[i].IR_buf.fetch_time=fetch_time;
+					fetch_time = fetch_time + 1;
 					flag=1;
 					i++;
 					total_no_instr_fetched++;
@@ -386,7 +580,6 @@ void Fetch()
 				else
 				{
 					wait_L1++;
-					//l1_fetch_cycle=L1_time;
 					goto control1;
 				}
 
@@ -394,27 +587,27 @@ void Fetch()
 
 			else if((FETCH[i].L1_misscount!=1)&&(FETCH[i].L2_misscount!=1))
 			{
-				//instr_stop=i;
 				FETCH[i].L1_misscount=1;
-				//l1_fetch_cycle=L1_time;
-				goto control1; // GET OUT OF FETCHING, PUT FETCHED INSTRUCTIONS IN BUFFER AND MOVE TO DISPATCH STAGE
+
+				goto control1;
 			}
 
 			if((FETCH[i].L1_misscount==1)&&(FETCH[i].L2_hit==1))
-			{ // Generating a random number for a instruction and checking if hit in l2 cache
+			{
 
-				//l2:
+
 				if(wait_L2>=L2_time)
 				{
-			//		wait_L2=0;
-					Fetch_Array[i] = input;
+
 					strcpy(line,input);
 					ParseLineIntoTokens(line," \t\n",&field1,&field2,&field3);
 					FETCH[i].IR_buf.PC = atoi(field1);
-					FETCH[i].op = field2;
-					FETCH[i].operands = field3;
+					strncpy(FETCH[i].op,field2,strlen(field2)+1);
+					if(field3 != NULL)
+						strncpy(FETCH[i].operands,field3,strlen(field3)+1);
 					FETCH[i].valid = if_valid;
-					FETCH[i].fetch_time= l2_fetch_cycle+L1_time;
+					FETCH[i].IR_buf.fetch_time= fetch_time;
+					fetch_time = fetch_time + 1;
 					i++;
 					flag=1;
 					continue;
@@ -443,17 +636,19 @@ void Fetch()
 				//mem:
 				if(wait_Mem>=MEM_time)
 				{
-				//	wait_Mem=0;
+
 					FETCH[i].L1_misscount=0;
 					FETCH[i].L2_misscount=0;
 					Fetch_Array[i] = input;
 					strcpy(line,input);
 					ParseLineIntoTokens(line," \t\n",&field1,&field2,&field3);
 					FETCH[i].IR_buf.PC = atoi(field1);
-					FETCH[i].op = field2;
-					FETCH[i].operands = field3;
+					strncpy(FETCH[i].op,field2,strlen(field2)+1);
+					if(field3 != NULL)
+						strncpy(FETCH[i].operands,field3,strlen(field3)+1);
 					FETCH[i].valid = if_valid;
-					FETCH[i].fetch_time=total_fetch_cycle+mem_fetch_cycle;
+					FETCH[i].IR_buf.fetch_time=fetch_time;
+					fetch_time = fetch_time+1;
 					i++;
 					flag=1;
 					total_no_instr_fetched++;
@@ -467,14 +662,10 @@ void Fetch()
 
 			control1:
 
-			//total_fetch_cycle=total_fetch_cycle+ l1_fetch_cycle+l2_fetch_cycle+mem_fetch_cycle;
 			instr_to_fetch=i;
-			//l1_fetch_cycle=0;
-			//l2_fetch_cycle=0;
-			//mem_fetch_cycle=0;
-
 			goto control2;
 		}
+
 
 		if(wait_L1==L1_time)
 			wait_L1=0;
@@ -490,6 +681,7 @@ void Fetch()
 			counter=0;
 
 		control2:
+		IF.total_no_instr_fetched=total_no_instr_fetched;
 		if(flag==1)
 		{
 		for(i=0;i<total_no_instr_fetched;i++)
@@ -509,38 +701,17 @@ void Fetch()
 				{//x
 					tail_fetch=(tail_fetch+1)%SW;
 					X1:
-					IF_ID[tail_fetch].op = FETCH[i].op;
-					IF_ID[tail_fetch].operands = FETCH[i].operands;
+					strcpy(IF_ID[tail_fetch].op,FETCH[i].op);
+					strcpy(IF_ID[tail_fetch].operands,FETCH[i].operands);
 					IF_ID[tail_fetch].IR_buf.PC = FETCH[i].IR_buf.PC;
 					IF_ID[tail_fetch].valid = FETCH[i].valid;
-					//IF.total_no_instr_fetched=total_no_instr_fetched;
+					IF_ID[tail_fetch].IR_buf.fetch_time = FETCH[i].IR_buf.fetch_time;
+					Branch_Prediction(IF_ID[tail_fetch].op, tail_fetch);
+
 				}
 			}
-		IF.total_no_instr_fetched=total_no_instr_fetched;
 
-		for(i=0;i<total_no_instr_fetched;i++)
-		{
-			// Gshare predictor
-			//NT=0 ; T=1
-
-			pc_value= FETCH[head_fetch].IR_buf.PC;
-			pc_shift = (pc_value) >> 3;
-			offset_addr=(pc_shift)^(bhsr);
-			for(x=0;x<BTB_size;x++)
-			{
-				if(offset_addr==&gshare[x])
-				{
-					br_pred_bit=gshare[x];
-					if((br_pred_bit==0)&&(br_pred_bit==1))
-						br_pred= 0;
-					if((br_pred_bit==2)&&(br_pred_bit==3))
-						br_pred=1;
-				}
-			}
 		}
-		}
-
-
 		if(feof(fpt))
 			done = true;
 	}
@@ -558,7 +729,7 @@ void Fetch()
 void Decode()
 /* identifies the instruction types and separates them into there sources and register destination and operands */
 
-// removed struct instruction IR_buf array since structure is used
+
 
 {
 	int insert;
@@ -577,6 +748,7 @@ void Decode()
 			}
 			else
 			{
+
 				field2 = IF_ID[i].op;
 				field3 = IF_ID[i].operands;
 
@@ -593,7 +765,13 @@ void Decode()
 				if((strcmp(field2,"syscall") == 0) || (strcmp(field2,"nop") == 0))
 				{
 					if(strcmp(field2,"syscall") == 0)
+					{
 						Decode_inst[i].op = syscall;
+						Decode_inst[i].d = -1;
+						Decode_inst[i].s1 = -1;
+						Decode_inst[i].s2 = -1;
+						Decode_inst[i].imm = -1;
+					}
 					else if(strcmp(field2,"nop") == 0)
 					{
 						Decode_inst[i].op = nop;
@@ -938,15 +1116,10 @@ void Decode()
 					DISPATCH[available_dispatch].valid = IF_ID[i].valid;
 					DISPATCH[available_dispatch].busy = 1;
 					DISPATCH[available_dispatch].fetch_time = IF_ID[i].IR_buf.fetch_time;
+					DISPATCH[available_dispatch].branch_taken = IF_ID[i].branch_taken;
+					DISPATCH[available_dispatch].branch_prediction = IF_ID[i].branch_prediction;
+					IF_ID[i].valid = 0;
 				}
-				/*ID_DIS[i].IR_buf.op = Decode_inst[i].op;
-				ID_DIS[i].IR_buf.d = Decode_inst[i].d;
-				ID_DIS[i].IR_buf.s1 = Decode_inst[i].s1;
-				ID_DIS[i].IR_buf.s2 = Decode_inst[i].s2;
-				ID_DIS[i].IR_buf.imm = Decode_inst[i].imm;
-				ID_DIS[i].IR_buf.PC = IF_ID[i].IR_buf.PC;
-				ID_DIS[i].valid = IF_ID[i].valid;*/
-				//printf("ID_DIS.ir pc ",ID_DIS[i].IR_buf.PC);
 
 			}
 		}
@@ -957,13 +1130,13 @@ void Decode()
 void Dispatch()
 { //dispatch
 
-/* here it should go for next i once IR_fetched_flag =1 i.e inst pushed*/
 	int jj;
 	int ii;
-	for(i=0; i < ID.total_no_instr_fetched; i++)
+
+	for(i=0; i < SW; i++)
 	{//sw
 		IR_inserted_flag=0;
-		//dis_valid = ID_DIS[i].valid;
+
 		dis_valid = DISPATCH[head_dispatch].valid;
 		if(dis_valid == 0)
 		{
@@ -1029,14 +1202,6 @@ void Dispatch()
 													RS_int[c].valid1 = 0;
 													RS_int[c].operand1 = ARF[src_value1].tag;
 
-						 							  /*ref_rrf_tag= ARF[src_value1].tag;
-						 							  // to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 							  if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s1))
-						 							    RS_int[c].valid1=RRF[ref_rrf_tag].data;
-
-						 							  else
-						 							  RS_int[c].valid1=ref_rrf_tag;*/
-
 						 						  }
 						 					   }
 
@@ -1052,12 +1217,6 @@ void Dispatch()
 						 					  	{
 													RS_int[c].valid2 = 0;
 													RS_int[c].operand2 = ARF[src_value2].tag;
-						 					  		/*ref_rrf_tag= ARF[src_value2].tag;
-						 					  		// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 					  		if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s2))
-						 					  			RS_int[c].valid2=RRF[ref_rrf_tag].data;
-						 					  		else
-						 					  			RS_int[c].valid2=ref_rrf_tag;*/
 
 						 					  	}
 						 					  }
@@ -1107,7 +1266,9 @@ void Dispatch()
 						 					IR_inserted_flag=1;
 						 				}//RSINT
 						 				   if(IR_inserted_flag==1)
-						 				   break;
+						 				   	break;
+										   else if(IR_inserted_flag == 0 && c == RS_entries-1)
+											tail_rob=(tail_rob-1)%ROB_no;
 						 			}//x1
        	   	   	   	   	   	   	   if(IR_inserted_flag==1)
        	   	   	   	   	   	   		   break;
@@ -1141,12 +1302,6 @@ void Dispatch()
 						 							 {
 														RS_fpp[c].valid1 = 0;
 														RS_fpp[c].operand1 = ARF[src_value1].tag;
-						 								/* ref_rrf_tag= ARF[src_value1].tag;
-						 								 // to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 								 if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s1))
-						 								 	 RS_fpp[c].valid1=RRF[ref_rrf_tag].data;
-						 								 else
-						 								 	 RS_fpp[c].valid1=ref_rrf_tag;*/
 
 						 							 }
 						 						 }
@@ -1159,12 +1314,7 @@ void Dispatch()
 						 							 {
 														RS_fpp[c].valid2 = 0;
 														RS_fpp[c].operand2 = ARF[src_value2].tag;
-						 								/* ref_rrf_tag= ARF[src_value2].tag;
-						 								 // to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 								 if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s2))
-						 									 RS_fpp[c].valid2=RRF[ref_rrf_tag].data;
-						 								 else
-						 									 RS_fpp[c].valid2=ref_rrf_tag;*/
+
 						 							 }
 						 						 }
 												 if(DISPATCH[head_dispatch].s1 == r0)
@@ -1215,16 +1365,19 @@ void Dispatch()
 						 						 IR_inserted_flag=1;
 						 					 }//rsfpp
 						 					if(IR_inserted_flag==1)
-						 					 break;
+						 						break;
+											else if(IR_inserted_flag == 0 && c == RS_entries-1)
+												tail_rob=(tail_rob-1)%ROB_no;
 						 				 }// x2
 
 /*for Load inst, RS mem */			else if((DISPATCH[head_dispatch].op==lb)||(DISPATCH[head_dispatch].op==lbu)||(DISPATCH[head_dispatch].op==lh)||(DISPATCH[head_dispatch].op==lhu)||(DISPATCH[head_dispatch].op==lw)||(DISPATCH[head_dispatch].op==ls)||(DISPATCH[head_dispatch].op==ld))  //branch instructions
 						 				{//x3
 											if(((tail_rs_mem +1)%RS_entries)==head_rs_mem)
 											{
-												printf("overflow");
+												//printf("overflow");
 												tail_rob=(tail_rob-1)%ROB_no;
 												rs_mem_overflow_stall = 1;
+												break;
 											}
 											else
 											{//mem3
@@ -1267,12 +1420,7 @@ void Dispatch()
 						 							 {
 														RS_mem[c].valid1 = 0;
 														RS_mem[c].operand1 = ARF[src_value1].tag;
-						 								/* ref_rrf_tag= ARF[src_value1].tag;
-						 								 // to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 								 if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s1))
-						 									 RS_mem[c].valid1=RRF[ref_rrf_tag].data;
-						 								 else
-						 									 RS_mem[c].valid1=ref_rrf_tag;*/
+
 						 							 }
 						 						 }
 						 						 if(DISPATCH[head_dispatch].s2==ARF[src_value2].reg_dst && src_value2 != -1)
@@ -1284,12 +1432,7 @@ void Dispatch()
 						 							 {
 														RS_mem[c].valid2 = 0;
 														RS_mem[c].operand2 = ARF[src_value2].tag;
-						 								/* ref_rrf_tag= ARF[src_value2].tag;
-						 								 // to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 								 if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s2))
-						 									 RS_mem[c].valid2=RRF[ref_rrf_tag].data;
-						 								 else
-						 									 RS_mem[c].valid2=ref_rrf_tag;*/
+
 						 							 }
 						 						 }
 						 						 if(DISPATCH[head_dispatch].imm || DISPATCH[head_dispatch].imm==0)
@@ -1322,11 +1465,13 @@ void Dispatch()
 												if(head_dispatch == tail_dispatch)
 													head_dispatch = tail_dispatch = -1;
 												else
-													 head_dispatch=(head_dispatch+1)%512;
+													 head_dispatch=(head_dispatch+1)%512; // tail not being updated
 						 						 IR_inserted_flag=1;
 						 					 }//rsmem
 						 					 if(IR_inserted_flag==1)
 						 						 break;
+											 else if(IR_inserted_flag == 0 && c == RS_entries-1)
+												tail_rob=(tail_rob-1)%ROB_no;
 												}
 											    }
 
@@ -1348,21 +1493,21 @@ void Dispatch()
 						 				if(DISPATCH[head_dispatch].s1==ARF[src_value1].reg_dst)
 						 				{
 						 					RS_br[c].operand1=DISPATCH[head_dispatch].s1;
+											RS_br[c].op = DISPATCH[head_dispatch].op;
+											RS_br[c].PC = DISPATCH[head_dispatch].PC;
+										  	RS_br[c].fetch_time = DISPATCH[head_dispatch].fetch_time;
+											RS_br[c].d = DISPATCH[head_dispatch].d;
+											RS_br[c].busy = 1;
 						 					if(ARF[src_value1].busy==0)
 						 						RS_br[c].valid1=1;
 						 					else
 						 					{
 												RS_br[c].valid1 = 0;
 												RS_br[c].operand1 = ARF[src_value1].tag;
-						 						/*ref_rrf_tag= ARF[src_value1].tag;
-						 						// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 						if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s1))
-						 							RS_br[c].valid1=RRF[ref_rrf_tag].data;
-						 						else
-						 							RS_br[c].valid1=ref_rrf_tag;*/
+
 						 					}
 						 				}
-						 				if(DISPATCH[head_dispatch].s2==ARF[src_value2].reg_dst)
+						 				if(DISPATCH[head_dispatch].s2==ARF[src_value2].reg_dst && src_value2 != -1)
 						 				{
 						 					RS_br[c].operand2=DISPATCH[head_dispatch].s2;
 						 					if(ARF[src_value2].busy==0)
@@ -1371,22 +1516,14 @@ void Dispatch()
 						 					{
 												RS_br[c].valid2 = 0;
 												RS_br[c].operand2 = ARF[src_value2].tag;
-						 						/*ref_rrf_tag= ARF[src_value2].tag;
-						 						// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-						 						if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s2))
-						 							RS_br[c].valid2=RRF[ref_rrf_tag].data;
-						 						else
-						 							RS_br[c].valid2=ref_rrf_tag;*/
+
 						 					}
 						 				}
-						 				if(DISPATCH[head_dispatch].imm)
-						 				{
-						 					RS_br[c].operand2=DISPATCH[head_dispatch].imm;
-						 					RS_br[c].valid2=1;
-						 				}
+
 
 	//DEstination is not allocated in RRF AND ARF
-
+										RS_br[c].valid2 = 1;
+										RS_br[c].operand2 = -1;
 						 				RRF[available_rrf].busy=1;
 						 				index_to_arf= available_rrf;
 						 				RRF[available_rrf].reg_dst=DISPATCH[head_dispatch].d;
@@ -1397,6 +1534,8 @@ void Dispatch()
 										ROB[available_rob].fetch_time = DISPATCH[head_dispatch].fetch_time;
 						 				ROB[available_rob].finished=0;
 										ROB[available_rob].rrf_tag = available_rrf;
+										RS_br[available_rs_br].branch_prediction = DISPATCH[head_dispatch].branch_prediction;
+										RS_br[available_rs_br].branch_taken = DISPATCH[head_dispatch].branch_taken;
 						 				RS_br[available_rs_br].ROB_tag=available_rob;
 						 				if(DISPATCH[head_dispatch].d==ARF[DISPATCH[head_dispatch].d].reg_dst)
 						 				{
@@ -1415,6 +1554,8 @@ void Dispatch()
 				 						}//rsbr
 				 						if(IR_inserted_flag==1)
 				 							break;
+										else if(IR_inserted_flag == 0 && c == RS_entries-1)
+											tail_rob=(tail_rob-1)%ROB_no;
 									}//x4
 						 		  }//x5
 						 		}//closing x
@@ -1427,7 +1568,7 @@ void Dispatch()
 			else if(DISPATCH[head_dispatch].d ==(-1)) //zz1
 			{
 /*Jump/br inst .. RS_BR*/
-				if(DISPATCH[head_dispatch].op == nop)
+				if(DISPATCH[head_dispatch].op == nop || DISPATCH[head_dispatch].op == syscall)
 				{
 					if(((tail_rob+1)%ROB_no)==head_rob)
 					{
@@ -1511,12 +1652,7 @@ void Dispatch()
 											{
 												RS_br[c].valid1 = 0;
 												RS_br[c].operand1 = ARF[src_value1].tag;
-												/*ref_rrf_tag= ARF[src_value1].tag;
-												// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-												if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s1))
-													RS_br[c].valid1=RRF[ref_rrf_tag].data;
-												else
-													RS_br[c].valid1=ref_rrf_tag;*/
+
 											}
 										}
 										if(DISPATCH[head_dispatch].s2==ARF[src_value2].reg_dst)
@@ -1528,12 +1664,7 @@ void Dispatch()
 											{
 												RS_br[c].valid2 = 0;
 												RS_br[c].operand2 = ARF[src_value2].tag;
-												/*ref_rrf_tag= ARF[src_value2].tag;
-												// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-												if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s2))
-													RS_br[c].valid2=RRF[ref_rrf_tag].data;
-												else
-													RS_br[c].valid2=ref_rrf_tag;*/
+
 											}
 										}
 										if(DISPATCH[head_dispatch].s1 == r0)
@@ -1564,6 +1695,8 @@ void Dispatch()
 										ROB[available_rob].PC= DISPATCH[head_dispatch].PC;
 										ROB[available_rob].fetch_time = DISPATCH[head_dispatch].fetch_time;
 										ROB[available_rob].finished=0;
+										RS_br[available_rs_br].branch_prediction = DISPATCH[head_dispatch].branch_prediction;
+										RS_br[available_rs_br].branch_taken = DISPATCH[head_dispatch].branch_taken;
 										RS_br[available_rs_br].ROB_tag=available_rob;
 										DISPATCH[head_dispatch].busy = 0;
 										dispatch_overflow_stall = 0;
@@ -1575,6 +1708,8 @@ void Dispatch()
 										if(IR_inserted_flag==1)
 											break;
 									}//br1
+								  if(IR_inserted_flag == 0 && c == RS_entries-1)
+									tail_rob=(tail_rob-1)%ROB_no;
 						 		  }//br2
 							}//br3
 						}//br4
@@ -1603,7 +1738,7 @@ void Dispatch()
 							available_rob=b;
 							if(((tail_rs_mem +1)%RS_entries)==head_rs_mem)
 							{
-								printf("overflow");
+								//printf("overflow");
 								tail_rob = (tail_rob-1)%ROB_no;
 								rs_mem_overflow_stall = 1;
 							}
@@ -1645,12 +1780,7 @@ void Dispatch()
 			                        	{
 								RS_mem[c].valid1 = 0;
 								RS_mem[c].operand1 = ARF[src_value1].tag;
-			                        		/*ref_rrf_tag= ARF[src_value1].tag;
-			                        		// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-			                        		if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s1))
-			                        			RS_mem[c].valid1=RRF[ref_rrf_tag].data;
-			                        		else
-			                        			RS_mem[c].valid1=ref_rrf_tag;*/
+
 			                        	}
 			                        }
 			                        if(DISPATCH[head_dispatch].s2==ARF[src_value2].reg_dst)
@@ -1662,12 +1792,7 @@ void Dispatch()
 			                        	{
 								RS_mem[c].valid2 = 0;
 								RS_mem[c].operand2 = ARF[src_value2].tag;
-			                        		/*ref_rrf_tag= ARF[src_value2].tag;
-			                        		// to check the rrf for that tag from arf and check if in rrf for that src value its valid=1
-			                        		if((RRF[ref_rrf_tag].valid==1)&&(RRF[ref_rrf_tag].reg_dst==ID_DIS[i].IR_buf.s2))
-			                        			RS_mem[c].valid2=RRF[ref_rrf_tag].data;
-			                        		else
-			                        			RS_mem[c].valid2=ref_rrf_tag;*/
+
 			                        	}
 			                        }
 						if(DISPATCH[head_dispatch].s1 == r0)
@@ -1681,29 +1806,26 @@ void Dispatch()
 							RS_mem[c].operand1=0;
 							RS_mem[c].valid1 = 1;
 						}
-			                       /* if(ID_DIS[i].IR_buf.imm)
-			                        {
-			                        	RS_mem[c].operand2=ID_DIS[i].IR_buf.imm;
-			                        	RS_mem[c].valid2=1;
-			                        }*/
+
 
 			                        //DEstination is not allocated in RRF AND ARF
 
-			                        ROB[available_rob].busy=1;
-			                        ROB[available_rob].issued=1;
-			                        ROB[available_rob].PC= DISPATCH[head_dispatch].PC;
+						ROB[available_rob].busy=1;
+						ROB[available_rob].issued=1;
+						ROB[available_rob].PC= DISPATCH[head_dispatch].PC;
 						ROB[available_rob].fetch_time = DISPATCH[head_dispatch].fetch_time;
-			                        ROB[available_rob].finished=0;
-			                        RS_mem[available_rs_mem].ROB_tag=available_rob;
+						ROB[available_rob].finished=0;
+						RS_mem[available_rs_mem].ROB_tag=available_rob;
 						DISPATCH[head_dispatch].busy = 0;
 						dispatch_overflow_stall = 0;
 						if(head_dispatch == tail_dispatch)
 							head_dispatch = tail_dispatch = -1;
 						else
 							head_dispatch=(head_dispatch+1)%512;
-			                        IR_inserted_flag=1;
-			                        if(IR_inserted_flag==1)
-			                        	break;
+						IR_inserted_flag=1;
+						if(IR_inserted_flag==1)
+							//break;      /* change 1*/
+							continue;
 									}//mem1
 							}//mem2
 						}//mem3
@@ -1714,13 +1836,15 @@ void Dispatch()
 		}//zz2
 	}//sw
 
-	DIS.total_no_instr_fetched;
-	if(dis_valid!=0){
+	DIS.total_no_instr_fetched=ID.total_no_instr_fetched;
+
 	for(i=0; i < DIS.total_no_instr_fetched; i++)
 	{
-		DIS_ISS[i].valid = DISPATCH[head_dispatch].valid;
+
+		DIS_ISS[i].valid = 1;
+
 	}
-	}
+
 }
 
 /*---------------------------------------------------------------------------------------------------------*/
@@ -1844,6 +1968,36 @@ void Issue()
 			{
 				if(RS_mem[head_rs_mem].busy == 1 && RS_mem[head_rs_mem].ready == 1)
 				{
+					if(L1_data_miss!=1)
+					{
+						if(((rand()%100)<= L1_data_hitrate)&& (L1_data_miss==0))
+						{// Generating a random number for the L1 data cache
+							FU_mem[jj].memory_execute_time = 2+L1_data_time;
+						}
+						else
+						{
+							L1_data_miss=1;
+							continue;
+						}
+					}
+					if((L1_data_miss==1)&&(rand()%100<=L2_hitrate))
+					{ // Generating a random number for L2 cache
+						FU_mem[jj].memory_execute_time = 2+L1_data_time+L2_time;
+						L1_data_miss = 0;
+						continue;
+					}
+					else if(L1_data_miss==1)
+					{
+						FU_mem[jj].memory_execute_time = 2+L1_data_time+L2_time+MEM_time;
+						L2_data_miss=1;
+						continue;
+					}
+					if(L2_data_miss==1)
+					{
+		    				L1_data_miss=0;
+		    				L2_data_miss=0;
+					}
+
 					//Send to FU
 					FU_mem[jj].d = RS_mem[head_rs_mem].d;
 					FU_mem[jj].operand1 = RS_mem[head_rs_mem].operand1;
@@ -1892,6 +2046,8 @@ void Issue()
 					FU_br[jj].op = RS_br[insert].op;
 					FU_br[jj].ROB_tag = RS_br[insert].ROB_tag;
 					FU_br[jj].busy = 1;
+					FU_br[jj].branch_prediction = RS_br[insert].branch_prediction;
+					FU_br[jj].branch_taken = RS_br[insert].branch_taken;
 					RS_br[insert].busy = 0;
 					RS_br[insert].valid1 = 0;
 					RS_br[insert].valid2 = 0;
@@ -1911,6 +2067,8 @@ for(i=0; i < SW; i++)
 /*********************************************Execute stage ****************************************************/
 void Execute()
 {
+	int gshare_index;
+	int cc;
 	ex_valid = ISS_EX[0].valid;
 	if(ex_valid == 0)
 	{
@@ -1973,7 +2131,7 @@ void Execute()
 			if(FU_mem[i].busy == 1)
 				FU_mem[i].execute_cycles += 1;
 			//check if hit or miss and add to total cycles
-			if(FU_mem[i].execute_cycles == 2)
+			if(FU_mem[i].execute_cycles == FU_mem[i].memory_execute_time && FU_mem[i].busy==1)
 			{
 				FU_mem[i].busy = 0;
 				ROB[FU_mem[i].ROB_tag].finished = 1;
@@ -1986,9 +2144,58 @@ void Execute()
 			FU_br[0].execute_cycles += 1;
 		if(FU_br[0].execute_cycles == 1)
 		{
+			if(FU_br[0].op == jalr)
+				RRF[ARF[FU_br[i].d].tag].valid = 1;
 			FU_br[0].busy = 0;
 			ROB[FU_br[0].ROB_tag].finished = 1;
 			FU_br[0].execute_cycles = 0;
+			if(BTB_tail == -1)
+				BTB_tail = 0;
+			for(cc=0; cc<BTB_tail; cc++)
+			{
+				if(BTB[cc] == ROB[FU_br[0].ROB_tag].PC)
+					break;
+			}
+			if(BTB[cc] == ROB[FU_br[0].ROB_tag].PC)
+			{
+				gshare_index = ((ROB[FU_br[0].ROB_tag].PC&0x3FF)>>3) ^ bhsr;
+			}
+			else
+			{
+				BTB[BTB_tail] = ROB[FU_br[0].ROB_tag].PC;
+				gshare_index = ((BTB[BTB_tail]&0x3FF) >> 3) ^ bhsr;
+			}
+			if(gshare[gshare_index] == 0)
+			{
+				if(FU_br[0].branch_taken == 1)
+					gshare[gshare_index] = 1;
+			}
+			else if(gshare[gshare_index] == 1)
+			{
+				if(FU_br[0].branch_taken == 1)
+					gshare[gshare_index] = 2;
+				else
+					gshare[gshare_index] = 0;
+			}
+			else if(gshare[gshare_index] == 2)
+			{
+				if(FU_br[0].branch_taken == 1)
+					gshare[gshare_index] = 3;
+				else
+					gshare[gshare_index] = 1;
+			}
+			else if(gshare[gshare_index] == 3)
+			{
+				if(FU_br[0].branch_taken == 0)
+					gshare[gshare_index] = 2;
+			}
+			if(FU_br[0].branch_taken == 0)
+				bhsr = ((bhsr << 1) | 0) & 0x3FF;
+			if(FU_br[0].branch_taken == 1)
+				bhsr = ((bhsr << 1) | 1) & 0x3FF;
+			BTB_tail += 1;
+			if(BTB_tail > BTB_size)
+				BTB_tail = 0;
 		}
 
 	}
@@ -2015,7 +2222,7 @@ void Commit()
 		{
 			if(ROB[head_rob].finished == 1)
 			{
-				printf("Finished Instruction at %d %d\n", ROB[head_rob].PC, ROB[head_rob].fetch_time);
+				//printf("Finished Instruction at %d %d\n", ROB[head_rob].PC, ROB[head_rob].fetch_time);
 				ROB[head_rob].busy = 0;
 				ROB[head_rob].finished = 0;
 				ROB[head_rob].issued = 0;
@@ -2059,6 +2266,7 @@ void Commit()
 					head_rob = tail_rob = -1;
 				else
 					head_rob=(head_rob+1)%ROB_no;
+				finished_instructions = finished_instructions + 1;
 			}
 		}
 	}
